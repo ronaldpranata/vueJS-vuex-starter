@@ -1,0 +1,223 @@
+def data;
+def junitPath = 0;
+def coveragePath = 1;
+def eslintPath = 2;
+def e2ePath = 3;
+def rocketchatChannel = 4;
+
+
+pipeline {
+	agent any
+
+	environment {
+		STAGE1 = 'TRUE';
+		STAGE2 = 'TRUE';
+		TEST = 'FALSE';
+	}
+
+	stages {
+
+		stage ("install") {
+			// execute npm install
+			steps {
+				sh 'npm install';
+			}
+		}
+
+		stage ("NPM Calls") {
+			when {
+				expression { return env.STAGE1 == 'TRUE' }
+			}
+			steps {
+				parallel (
+					populateData: {
+						script {
+							msg ('populate data');
+							data = populateData ();
+
+							msg ('perform lint with eslint');
+							eslint (data, eslintPath);
+
+						}
+					},
+
+					unitTest: {
+						script {
+							msg ('perform unit test');
+							unitTestWithCoverage ();
+						}
+					}
+				) 
+			}
+		}
+
+		
+		stage ("Check BrowserStack") {
+			when {
+				expression { return env.STAGE2 == 'TRUE' }
+			}
+			steps {
+				script {
+					msg ('check for browserstack');
+					checkForBrowserStack ();
+				}
+				
+			}
+		}
+
+		stage ("Execute e2e Test") {
+			when {
+				expression { return env.STAGE2 == 'TRUE' }
+			}
+			steps {
+				msg ('perform e2e test');
+				e2e ();
+			}
+		}
+
+		stage ("Record Results") {
+			when {
+				expression { return env.STAGE1 == 'TRUE' }
+			}
+			steps {
+				parallel (
+					junit: {
+						msg ('record junit');
+						recordUnitTest(data, junitPath);
+					},
+
+					coverage: {
+						// record coverage report
+
+						msg ('record coverage');
+						recordCoverage(data, coveragePath);
+
+					},
+
+					rocketchat: {
+						script {
+							msg ('send to rocketchat');
+							sendToRocketChat(data, rocketchatChannel);
+						}
+					}
+				)
+			}
+		}
+
+	}
+
+	// post stage
+	post {
+		always {
+			echo "POST ACTION";
+		}
+		failure {
+
+			echo "FAIL!";
+		}
+	}
+}
+
+/*
+	HELPERS
+*/
+def msg (str) {
+	def bars = "=================";
+	echo bars + " " + str + " " + bars;
+}
+
+/*
+	MAIN STEPS
+*/
+def populateData () {
+	// split by new line and store output 
+	// into data variable
+	return sh (
+		script: 'npm run jenkins -s',
+		returnStdout: true
+	).trim().split('\n');
+} 
+def eslint (data, eslintPath) {
+	// run eslint
+	try {
+		sh 'npm run eslint';
+	} catch (e) {
+		console.log ("Eslint ran into errors");
+	} finally {
+		// record result
+		recordEslint (data, eslintPath);
+	}
+}
+
+def unitTestWithCoverage () {
+	try {
+		// run unit test
+		sh 'npm run unit-test -s';
+	} catch (e) {
+		console.log ("Test complete with failures");
+	}
+}
+
+def sendToRocketChat (data, rocketchatChannel) {
+	// store nicely formatted string into testResult variable
+	def testResult = sh (
+		script: "npm run rocketchat -s", //process json into readable format
+		returnStdout: true //save console output to variable
+	); 
+
+	// send testResult variable to rocketchat
+	rocketSend channel: data[rocketchatChannel], message: testResult, rawMessage: true;
+}
+
+def e2e () {
+
+    sh "npm run e2e";
+}
+
+
+/*
+	BROWSERSTACK FUNCTIONS
+*/
+def checkForBrowserStack () {
+	if (browserStackExists ()) {
+		echo "Yes it exists!";
+	} else {
+		echo "Nope it doesnt exist!";
+	}
+}
+def browserStackExists () {
+	return fileExists("/home/jenkinsci/BrowserStackLocal");
+}
+def installBrowserStackLocal () {
+	def dir = "/home/jenkinsci";
+	def type = 'linux-x64';
+	sh "curl -sS https://www.browserstack.com/browserstack-local/BrowserStackLocal-${type}.zip > ${dir}/BrowserStackLocal.zip";
+    unzip dir: '', glob: '', zipFile: '${dir}/BrowserStackLocal.zip';
+    sh "chmod +x ${dir}/BrowserStackLocal";
+}
+
+
+/*
+	RECORDERS
+*/
+def recordEslint (data, eslintPath) {
+	checkstyle canComputeNew: false, defaultEncoding: '', 
+				healthy: '', pattern: data[eslintPath], 
+				unHealthy: '';
+}
+def recordUnitTest (data, junitPath) {
+	// record junit report
+	junit data[junitPath];
+}
+
+def recordCoverage (data, coveragePath) {
+	step([$class: 'CoberturaPublisher', autoUpdateHealth: false, 
+		autoUpdateStability: false, coberturaReportFile: data[coveragePath], 
+		failUnhealthy: false, failUnstable: false, 
+		maxNumberOfBuilds: 0, onlyStable: false, 
+		sourceEncoding: 'ASCII', zoomCoverageChart: false]);
+}
+def recordE2e (data, e2ePath) {
+	//Collect Result
+	junit data[e2ePath];
+}
